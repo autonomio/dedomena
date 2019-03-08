@@ -1,0 +1,22 @@
+dist: trusty
+sudo: required
+before_install:
+language: python
+python:
+- '3.4'
+- '3.5'
+- '3.6'
+install:
+- pip install -r requirements.txt
+- python setup.py install
+- pip install coveralls
+script:
+- coverage run --source=dedomena ./test_script.py
+after_success: coveralls
+deploy:
+  provider: pypi
+  user: mikkokotila
+  password:
+    secure: yMWX9x4iv55Rnp6WFaqeCi+YPG60qmefGTVR3goMCvafSffKo5YfQXQACEg00gU4v1n4V15x8P+Z9+SKoMEom+AAi6SZr31qy2TJALQK11PLFWPcbR3s33tZ2UzVB8jXprOX5x4eRwJTEA/9snUE++kpDdfEaosrahiAEzAorV8R+DviUwq4YaERaYCs2sG33+3i9y5QNqst4EsuUQATZFpAihDzGYIRXMDhtEnrq834ITedLLvDHJqnkVq4dN/DmjbWtfpOFFQSeUv83xJJdgQntgdjLpthgSP9dRScSHTFJTP+X93orvKhOiaWNN7fu9p9KCvHNVb6XW7+CeUPhnKyB17vG6OLHFI8Wxj1a3lbdzhji0PCWh8w8nbNUQ4lhLxFIEEgOO6UN0oPQn7+LJl0SYHDmXEkT5dni6NYSt8CRQYluBo3YqGtr7oT5bywEYtJ47k89eHLCpCojayFRJoOdmLfABRLvauLXWYjkl2GeCTbcELue/nkmaKrgF01FTmIAYxm54mjR0MepNe2c9PcsswsTDucyHJ59+4PXZCAnmOVEldhArEeUrq0dqFHe9Ir9uyd60mcB3vtRO2LR63DP7ZI9APB+2tgeZW+GagS4YKsk6O1U6nhb6ceJnIsX2PZag2ufiyCAA90R7e87A/gsHu28QRJ6j7xXRucyw0=
+  on:
+    branch: production

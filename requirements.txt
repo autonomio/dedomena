@@ -1,0 +1,9 @@
+kerasplotlib
+wrangle
+numpy
+pandas
+spacy
+keras
+gensim
+tensorflow
+ipython
