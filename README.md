@@ -33,11 +33,6 @@
 <p align="center">
 A very high level API for accessing datasets, data APIs, and for generating synthetic and random datasets for deep learning and other research purposes.
 
-</p>
-<p align="center">
-<img src='https://cdn-images-1.medium.com/max/1600/1*Ua721c4o0oCpAloeT32wdA.jpeg' width=300px>
-</p>
-
 ### Dedomena
 
 Dedomena is a very high level API for accessing datasets, data APIs, and for generating synthetic and random datasets for deep learning and other research purposes. Dedomena provides an easy-to-use and remember three level namespace to 'datasets', 'apis', and 'generators'.
