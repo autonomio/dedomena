@@ -1,6 +1,6 @@
 <h1 align="center">
   <br>
-  <a href="http://autonom.io"><img src="https://raw.githubusercontent.com/autonomio/dedomena/master/logo.png" alt="Dedomena" width="150"></a>
+  <a href="http://autonom.io"><img src="https://raw.githubusercontent.com/autonomio/dedomena/master/logo.png" alt="Dedomena"></a>
   <br>
 </h1>
 
