@@ -56,11 +56,11 @@ Instant access to thousands of datasets through a single interface.
 
 ### Examples
 
-  # get a specific dataset from a provider
-  da.datasets.autonomio('icu_mortality')
+    # get a specific dataset from a provider
+    da.datasets.autonomio('icu_mortality')
 
-  # see all the datasets under a provider
-  da.datasets.autonomio()
+    # see all the datasets under a provider
+    da.datasets.autonomio()
 
 
 ### Install
