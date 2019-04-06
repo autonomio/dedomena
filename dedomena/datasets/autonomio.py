@@ -1,9 +1,9 @@
 def autonomio(dataset=None):
-    
+
     '''Load a dataset
-    
+
     dataset : str
-        One of the available datasets: 
+        One of the available datasets:
             'bitcoin_price'
             'breast_cancer'
             'cervical_cancer'
@@ -18,11 +18,11 @@ def autonomio(dataset=None):
             'personality_types_and_cannabis_use'
             'programmatic_ad_fraudago'
             'titanic'
-    
+
     Dataset source: https://github.com/autonomio/datasets/tree/master/autonomio-datasets
-    
+
     '''
- 
+
     import pandas as pd
 
     datasets = ['bitcoin_price',
@@ -39,7 +39,7 @@ def autonomio(dataset=None):
                 'personality_types_and_cannabis_use',
                 'programmatic_ad_fraudago',
                 'titanic']
-    
+
     if dataset is None:
         return datasets
 
@@ -47,5 +47,5 @@ def autonomio(dataset=None):
     url_2 = 'autonomio/datasets/master/autonomio-datasets/'
     url_end = '.csv'
     url = url_1 + url_2 + dataset + url_end
-    
+
     return pd.read_csv(url)
