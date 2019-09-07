@@ -16,7 +16,7 @@ def autonomio(dataset=None):
             'news_articles'
             'parties_and_employment'
             'personality_types_and_cannabis_use'
-            'programmatic_ad_fraudago'
+            'programmatic_ad_fraud'
             'titanic'
 
     Dataset source: https://github.com/autonomio/datasets/tree/master/autonomio-datasets
