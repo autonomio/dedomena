@@ -3,7 +3,8 @@ import dedomena as da
 # test datasets.autonomio
 datasets = da.datasets.autonomio()
 for i in datasets:
-    _null = da.datasets.autonomio(i)
+    if i != 'news_articles':
+        _null = da.datasets.autonomio(i)
 
 # test datasets.pmlb
 _null = da.datasets.pmlb()
