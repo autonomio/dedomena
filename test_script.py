@@ -3,7 +3,7 @@ import dedomena as da
 # test datasets.autonomio
 datasets = da.datasets.autonomio()
 for i in datasets:
-    _null = da.datasets.autonomio(datasets)
+    _null = da.datasets.autonomio(i)
 
 # test datasets.pmlb
 _null = da.datasets.pmlb()
