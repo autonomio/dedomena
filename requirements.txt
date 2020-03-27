@@ -7,3 +7,4 @@ keras
 gensim
 tensorflow
 ipython
+pymed

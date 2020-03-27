@@ -37,7 +37,7 @@ if __name__ == "__main__":
           url=URL,
           version=VERSION,
           download_url=DOWNLOAD_URL,
-          install_requires=['pmlb', 'pandas', 'twintel'],
+          install_requires=['pmlb', 'pandas', 'twintel', 'pymed'],
           packages=['dedomena',
                     'dedomena.apis',
                     'dedomena.datasets',
