@@ -40,7 +40,7 @@ def autonomio(dataset=None):
                 'parties_and_employment',
                 'personality_types_and_cannabis_use',
                 'programmatic_ad_fraud',
-                'titanic'
+                'titanic',
                 'icu_burden']
 
     if dataset is None:
