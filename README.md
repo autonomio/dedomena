@@ -50,7 +50,7 @@ Instant access to thousands of datasets through a single interface.
 ^^Requires approval for access.
 
 ### Examples
-
+    import dedomena as da
     # get a specific dataset from a provider
     da.datasets.autonomio('icu_mortality')
 

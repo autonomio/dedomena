@@ -18,6 +18,8 @@ def autonomio(dataset=None):
             'personality_types_and_cannabis_use'
             'programmatic_ad_fraud'
             'titanic'
+            'icu_burden'
+            
 
     Dataset source: https://github.com/autonomio/datasets/tree/master/autonomio-datasets
 
@@ -38,7 +40,8 @@ def autonomio(dataset=None):
                 'parties_and_employment',
                 'personality_types_and_cannabis_use',
                 'programmatic_ad_fraud',
-                'titanic']
+                'titanic'
+                'icu_burden']
 
     if dataset is None:
         return datasets
