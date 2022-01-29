@@ -15,7 +15,7 @@ MAINTAINER_EMAIL = 'mailme@mikkokotila.com'
 URL = 'http://autonom.io'
 LICENSE = 'MIT'
 DOWNLOAD_URL = 'https://github.com/autonomio/dedomena/'
-VERSION = '0.0.6'
+VERSION = '0.0.7'
 
 try:
     from setuptools import setup
@@ -23,6 +23,10 @@ try:
 except ImportError:
     from distutils.core import setup
 
+install_requires = ['pandas',
+                    'pymed',
+                    'twintel',
+                    'pmlb']
 
 if __name__ == "__main__":
 
@@ -37,7 +41,7 @@ if __name__ == "__main__":
           url=URL,
           version=VERSION,
           download_url=DOWNLOAD_URL,
-          install_requires=['pmlb', 'pandas', 'twintel', 'pymed'],
+          install_requires=install_requires,
           packages=['dedomena',
                     'dedomena.apis',
                     'dedomena.datasets',
