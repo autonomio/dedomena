@@ -13,4 +13,10 @@ for dataset in datasets:
     _null = da.datasets.pmlb(dataset)
 
 # test apis.twitter
-_null = da.apis.twitter('cars', 200)
+_null = da.apis.twitter('cars', 50)
+
+# test apis.pubmed
+_null = da.apis.pubmed('COVID', 50)
+
+# test apis.arxiv
+_null = da.apis.arxiv('nlp', 50)

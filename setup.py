@@ -15,7 +15,7 @@ MAINTAINER_EMAIL = 'mailme@mikkokotila.com'
 URL = 'http://autonom.io'
 LICENSE = 'MIT'
 DOWNLOAD_URL = 'https://github.com/autonomio/dedomena/'
-VERSION = '0.0.7'
+VERSION = '0.1.0'
 
 try:
     from setuptools import setup
@@ -26,7 +26,8 @@ except ImportError:
 install_requires = ['pandas',
                     'pymed',
                     'twintel',
-                    'pmlb']
+                    'pmlb',
+                    'xmltodict']
 
 if __name__ == "__main__":
 
