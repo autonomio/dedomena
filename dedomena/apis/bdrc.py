@@ -36,24 +36,24 @@ def bdrc(keyword):
     
     no_of_pages = results_dict['numberOfPages']
     next_page_url = results_dict['pLinks']['nextGet']
-    
+
     for page in range(no_of_pages - 1):
-        
+
         results_json = _get_results(keyword, url=next_page_url)
         results_dict = json.loads(results_json)
         next_page_url = results_dict['pLinks']['nextGet']
         current_page_results = results_dict['results']['bindings']
-        
+
         for i in range(len(current_page_results)):
-        
+
             text = current_page_results[i]['lit']['value']
             text = text.replace('\n','').replace('↤', '').replace('↦', '').replace('#', '')
             score = current_page_results[i]['score']['value']
             uri = current_page_results[i]['txt']['value']
 
             out.append([text, score, uri])
-            
+        
     out = pd.DataFrame(out)
     out.columns = ['text', 'score', 'uri']
-            
+        
     return out
