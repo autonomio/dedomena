@@ -70,8 +70,6 @@ def springer(keywords, n):
     # get number of pages
     total_articles = int(results_dict['result'][0]['total'])
     
-    print(total_articles)
-    
     if total_articles > n:
         total_articles = n
 
