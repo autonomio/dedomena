@@ -28,7 +28,7 @@ class EuropePMC(Transport):
         positive_int(page_size, 1000, "page_size")
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a nonempty Europe PMC query")
-        kind = result_type or self.result_type
+        kind = self.result_type if result_type is None else result_type
         if kind not in ("lite", "core"):
             raise ValueError("result_type must be lite or core")
         params = {"query": query, "format": "json", "resultType": kind,
@@ -78,7 +78,12 @@ class EuropePMC(Transport):
             return "MED", identifier
         match = re.fullmatch(r"([A-Z]{2,8}):([A-Za-z0-9._/-]+)", identifier)
         if match:
-            return match[1], match[2]
+            source, value = match[1], match[2]
+            if source == "PMC":
+                if not re.fullmatch(r"(?:PMC)?[0-9]+", value):
+                    raise ValueError("PMC identifier must contain a numeric PMCID")
+                value = "PMC" + value.removeprefix("PMC")
+            return source, value
         raise ValueError("identifier must be a PMID, PMCID or SOURCE:ID")
 
     def fetch(self, identifier: str, *, refresh: bool = False) -> Page:
@@ -103,6 +108,8 @@ class EuropePMC(Transport):
     def fetch_many(self, identifiers: Iterable[str], *, result_type: str = "core",
                    refresh: bool = False) -> Iterator[Page]:
         """Batch up to 100 exact IDs per query; never silently remove unresolved IDs."""
+        if result_type not in ("lite", "core"):
+            raise ValueError("result_type must be lite or core")
         for batch in chunks(identifiers, 100):
             clauses = []
             for identifier in batch:

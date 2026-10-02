@@ -115,10 +115,19 @@ demand; free OpenAlex singleton workers default to 16 and can be raised to 100.
 
 Retries cover timeouts and transient 429/5xx. Budget exhaustion stops immediately.
 Long Retry-After returns `Throttled` with its delay instead of indefinite sleep.
+The cooldown remains shared even when the caller exhausts retries or cannot wait.
+Sleeping workers recheck shared limits before admission; authentication finishes
+before rate slots are acquired.
 Unknown transport failures retain reservations because the source may have charged
 the call. Successful replies reconcile actual credits. EPO reserves maximum
 response bytes before dispatch, settles transfer counts, and adopts reported
-weekly usage. This leaves headroom near its allowance boundary.
+weekly usage. Provider usage floors and in-flight reservations are separate;
+settling one request cannot refund another worker's observed usage. When response
+ordering cannot establish whether observed usage already includes a settled cost,
+admission retains a conservative upper bound; traffic statistics keep actual costs.
+Observations
+remain assigned to the request's original UTC day/week across reset boundaries.
+This leaves headroom near the allowance boundary.
 EPO follows the most restrictive service RPM observed in 60 seconds and a
 1 Mbit/s byte schedule.
 
@@ -127,6 +136,10 @@ day, observes later allowance headers, and defaults to a 10,000-credit local cap
 It does not automatically expand into prepaid usage. Unrelated clients sharing
 the key can race local checks; route callers through the same store/service for
 coordinated admission. Usage counters measure store traffic, not the whole account.
+A charged exact OpenAlex lookup is rejected on fresh and cached reads; its
+original billing headers remain available in the raw snapshot for inspection.
+Explicit empty field selections or result types are rejected rather than defaulted.
+Europe PMC accepts `PMC123`, `PMC:123` and `PMC:PMC123` as one canonical PMCID.
 Credentials and OAuth/quota responses are never saved as source snapshots.
 
 ## Canary starting point and integration
@@ -201,3 +214,13 @@ These profiles intentionally carry different fields; select richer evidence only
 when needed. This comparison measures transfer weight, not improved recall.
 Probe reports and raw snapshots remain locally under ignored
 out/source-probes-2026-10-01/. EPO still requires a live credentialed probe.
+
+## Patent evidence integrity
+
+Both DOCDB and EPODOC full-text requests validate every returned document's
+identity. Partial EPO ranges preserve their incompleteness and warnings through
+the terminal page; a later full range cannot repair an earlier missing range.
+The JSON XML tree keeps grouped child fields and an ordered `child_order` list
+of qualified-tag/index references. Following that list recursively, retaining
+node text and child tails, reconstructs mixed patent text in its original order.
+Original XML bytes remain independently replayable.

@@ -24,12 +24,21 @@ def nodes(root, name):
 
 
 def xml_value(node):
-    """Preserve repeated children, attributes and original text in a small JSON tree."""
+    """Preserve XML content and order without duplicating each child subtree.
+
+    Existing local-tag groups remain available. Each child_order entry identifies
+    a child by its qualified tag and its index within that local-tag group.
+    """
     out = {"attributes": dict(node.attrib), "text": node.text or ""}
     if node.tail is not None:
         out["tail"] = node.tail
+    order = []
     for child in node:
-        out.setdefault(local(child.tag), []).append(xml_value(child))
+        group = out.setdefault(local(child.tag), [])
+        order.append({"tag": child.tag, "index": len(group)})
+        group.append(xml_value(child))
+    if order:
+        out["child_order"] = order
     return out
 
 
@@ -103,7 +112,7 @@ class EPO(Transport):
                 self._token, self._expires = token, self.store.clock() + ttl - 30
             return self._token
 
-    def _observe(self, headers):
+    def _observe(self, headers, *, request_windows=None):
         self._last_headers = dict(headers)
         value = headers.get("x-registeredquotaperweek-used")
         if value is not None:
@@ -113,7 +122,8 @@ class EPO(Transport):
                     raise ValueError
             except ValueError:
                 raise InvalidResponse("epo: invalid weekly quota header") from None
-            self.store.observe_used(self.scope, "bytes", used, "week")
+            self.store.observe_used(self.scope, "bytes", used, "week",
+                                    window_key=(request_windows or {}).get("week"))
         # EPO requires the most restrictive instance signal during a 60-second window.
         for service, color, limit in re.findall(r"([a-z]+)=(green|yellow|red|black):([0-9]+)",
                                                 headers.get("x-throttling-control", "")):
@@ -170,6 +180,8 @@ class EPO(Transport):
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a nonempty EPO CQL query")
         path = "/published-data/search" + ("/biblio" if biblio else "")
+        traversal_incomplete = False
+        traversal_warnings = []
         while True:
             end = min(start + page_size - 1, self.SEARCH_CEILING)
             response = self._call(path, params={"q": query, "Range": f"{start}-{end}"},
@@ -204,11 +216,17 @@ class EPO(Transport):
             if len(rows) < expected and not allow_partial:
                 raise InvalidResponse("epo: source returned fewer patent records than the result range")
             following = None if finished else str(actual_end + 1)
-            warnings = (f"Only the first 2000 of {total} hits are accessible for this query.",) if capped else ()
+            traversal_incomplete |= capped or len(rows) < expected
+            if capped:
+                warning = f"Only the first 2000 of {total} hits are accessible for this query."
+                if warning not in traversal_warnings:
+                    traversal_warnings.append(warning)
             if len(rows) < expected:
-                warnings += (f"Source returned {len(rows)} records for a {expected}-hit range.",)
+                traversal_warnings.append(
+                    f"Source returned {len(rows)} records for the {expected}-hit range {begin}-{actual_end}.")
             yield self.page(response, rows, total=total, next_cursor=following,
-                            complete=finished and not capped and len(rows) >= expected, warnings=warnings, records_seen=min(actual_end, total))
+                            complete=finished and not traversal_incomplete,
+                            warnings=tuple(traversal_warnings), records_seen=min(actual_end, total))
             if finished:
                 return
             start = actual_end + 1
@@ -293,11 +311,21 @@ class EPO(Transport):
         documents = nodes(root, "fulltext-document")
         if not documents or not any(nodes(node, section) for node in documents):
             raise InvalidResponse("epo: requested full-text section is missing")
-        # DOCDB fulltext envelopes use the same three identity attributes.
-        if format == "docdb" and any(
-                ".".join(node.get(key, "") for key in ("country", "doc-number", "kind")) != ident
-                for node in documents):
-            raise InvalidResponse("epo: full text returned a different patent")
+        # Both lookup formats must match every full-text document envelope.
+        for node in documents:
+            country, number, kind = (node.get(key, "")
+                                     for key in ("country", "doc-number", "kind"))
+            # OPS guide 4.3: A is omitted; B/C may be attached; D-Z
+            # must be attached to the EPODOC publication number.
+            base = country + number
+            letter = kind[:1]
+            epodoc_ids = ((base,) if letter == "A" else
+                          (base, base + letter) if letter in ("B", "C") else
+                          (base + letter,))
+            row = {"id": ".".join((country, number, kind)), "kind": kind,
+                   "epodoc_ids": epodoc_ids}
+            if not all((country, number, kind)) or not self._matches(row, ident, format):
+                raise InvalidResponse("epo: full text returned a different patent")
         return response
 
     def quota(self) -> dict:
