@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -20,12 +21,13 @@ from urllib.parse import urlencode
 
 import httpx
 
-SCHEMA_VERSION = "0.4.0"
+SCHEMA_VERSION = "0.6.0"
 PUBLIC_HEADERS = {
     "content-type", "content-encoding", "x-ratelimit-limit", "x-ratelimit-remaining",
     "x-ratelimit-credits-used", "x-ratelimit-reset", "retry-after",
     "x-individualquotaperhour-used", "x-registeredquotaperweek-used",
     "x-registeredpayingquotaperweek-used", "x-throttling-control", "x-rejection-reason",
+    "etag", "last-modified", "date",
 }
 
 
@@ -92,6 +94,8 @@ class Provenance:
     public_request_headers: Mapping[str, str] | None = None
     request_body: str | None = None
     completed_at_utc: str | None = None
+    http_status: int | None = None
+    egress_ip_sha256: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -138,6 +142,20 @@ class Response:
             return body
         except (ValueError, UnicodeDecodeError):
             raise InvalidResponse(f"{self.provenance.source}: invalid JSON response") from None
+
+
+class _PrivateQueryLogFilter(logging.Filter):
+    # A stable filter avoids races caused by per-request filter removal. Redact
+    # the query field itself, so no credential registry or lifetime is needed.
+    def filter(self, record):
+        message = record.getMessage()
+        redacted = re.sub(r'([?&]api_key=)[^&\s"<>]+', r'\1[REDACTED]', message)
+        if redacted != message:
+            record.msg, record.args = redacted, ()
+        return True
+
+
+logging.getLogger("httpx").addFilter(_PrivateQueryLogFilter())
 
 
 class Store:
@@ -262,13 +280,18 @@ class Store:
     def reserve(self, scope: str, unit: str, amount: int, limit: int | None, period: str,
                 *, window_key: str) -> str:
         """Reserve atomically without mixing refundable estimates with provider usage."""
-        reservation = uuid.uuid4().hex
         with self.transaction() as db:
-            baseline, pending = self._budget(db, scope, unit, window_key)
-            if limit is not None and baseline + pending + amount > limit:
-                raise BudgetExceeded(f"{scope.split(':')[0]}: {period} {unit} allowance exhausted")
-            db.execute("INSERT INTO budget_reservations VALUES(?,?,?,?,?)",
-                       (reservation, scope, unit, window_key, amount))
+            return self._reserve_in(db, scope, unit, amount, limit, period, window_key=window_key)
+
+    def _reserve_in(self, db, scope: str, unit: str, amount: int, limit: int | None,
+                    period: str, *, window_key: str) -> str:
+        """Reserve inside the caller's final dispatch transaction."""
+        reservation = uuid.uuid4().hex
+        baseline, pending = self._budget(db, scope, unit, window_key)
+        if limit is not None and baseline + pending + amount > limit:
+            raise BudgetExceeded(f"{scope.split(':')[0]}: {period} {unit} allowance exhausted")
+        db.execute("INSERT INTO budget_reservations VALUES(?,?,?,?,?)",
+                   (reservation, scope, unit, window_key, amount))
         return reservation
 
     def settle(self, reservation: str, actual: int):
@@ -325,7 +348,7 @@ class Store:
         self.pace_many(((scope, rate),), sleep, max_wait)
 
     def pace_many(self, limits: tuple[tuple[str, float], ...],
-                  sleep: Callable[[float], None], max_wait: float):
+                  sleep: Callable[[float], None], max_wait: float, before_admit=None):
         """Admit all rate scopes together; waiters acquire no stale future dispatch slots."""
         began = self.clock()
         while True:
@@ -341,9 +364,16 @@ class Store:
                     due = max(due, row[0] if row else now, cooldown[0] if cooldown else now)
                     rates.append((scope, effective))
                 delay = due - now
-                if delay > max(0, max_wait - (now - began)):
+                if (delay > max(0, max_wait - (now - began))
+                        or (max_wait > 0 and now - began > max_wait)):
                     raise Throttled(limits[0][0].split(":")[0], delay)
                 if not delay:
+                    if before_admit is not None:
+                        before_admit(db, now)
+                    # No separately locking work may intervene between admission and send.
+                    now = self.clock()
+                    if max_wait > 0 and now - began > max_wait:
+                        raise Throttled(limits[0][0].split(":")[0], 0)
                     for scope, rate in rates:
                         db.execute("INSERT OR REPLACE INTO pacing VALUES(?,?)", (scope, now + 1 / rate))
                     return
@@ -365,7 +395,8 @@ class Transport:
                  requests_per_second: float = 10, cache_ttl: float = 86400,
                  max_response_bytes: int = 16_000_000, max_attempts: int = 3,
                  max_wait: float = 60, sleep: Callable[[float], None] = time.sleep,
-                 license: str = ""):
+                 license: str = "", ip_pool=None, ip_limit: tuple[int, float] | None = None,
+                 ip_throttle_only: bool = False):
         if not base_url.startswith("https://"):
             raise ValueError("source URL must use HTTPS")
         if requests_per_second <= 0 or not math.isfinite(requests_per_second):
@@ -375,13 +406,29 @@ class Transport:
                 or type(max_attempts) is not int or max_attempts < 1
                 or not math.isfinite(max_wait) or max_wait < 0):
             raise ValueError("invalid transport limits")
+        from .egress import IPPool, IPRoute
+        if ip_pool is not None and (not isinstance(ip_pool, IPPool) or client is not None):
+            raise ValueError("ip_pool must be an IPPool and cannot be combined with client")
+        if ip_limit is not None and (
+                not isinstance(ip_limit, tuple) or len(ip_limit) != 2
+                or type(ip_limit[0]) is not int or ip_limit[0] < 1
+                or type(ip_limit[1]) not in (int, float)
+                or not math.isfinite(ip_limit[1]) or ip_limit[1] <= 0):
+            raise ValueError("ip_limit must contain positive integer capacity and window seconds")
+        if type(ip_throttle_only) is not bool:
+            raise ValueError("ip_throttle_only must be boolean")
         self.source, self.base_url = source, base_url.rstrip("/")
         self.scope = source + ":" + digest(credential.encode())
         self._secrets = tuple(value for value in {credential, *credential.split(":")} if len(value) >= 8)
-        self.client = client or httpx.Client(timeout=30, follow_redirects=False,
-                                            limits=httpx.Limits(max_connections=100,
-                                                               max_keepalive_connections=100))
-        self._owns_client = client is None
+        self.client = None if ip_pool is not None else client or httpx.Client(
+            timeout=30, follow_redirects=False,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=100))
+        self._owns_client = client is None and ip_pool is None
+        self.ip_pool = ip_pool
+        self._owns_pool = ip_pool is None and ip_limit is not None
+        if self._owns_pool:
+            self.ip_pool = IPPool([IPRoute("0.0.0.0", client=self.client)])
+        self.ip_limit, self.ip_throttle_only = ip_limit, ip_throttle_only
         self.store = store or Store(os.environ.get("DEDOMENA_SOURCE_STORE",
                                 str(Path.home() / ".cache" / "dedomena" / "sources.sqlite3")))
         self._owns_store = store is None
@@ -390,6 +437,8 @@ class Transport:
         self.max_wait, self.sleep, self.license = max_wait, sleep, license
 
     def close(self):
+        if self._owns_pool:
+            self.ip_pool.close()
         if self._owns_client:
             self.client.close()
         if self._owns_store:
@@ -427,17 +476,29 @@ class Transport:
         return 0
 
     def _request(self, method: str, path: str, *, params: Mapping | None = None,
-                headers: Mapping | None = None, content: bytes | None = None,
+                headers: Mapping | None = None, private_params: Mapping | None = None,
+                content: bytes | None = None,
                 form: Mapping | None = None, auth=None, estimated_credits: int = 0,
                 credit_limit: int | None = None, byte_limit: int | None = None,
                 service: str = "requests", service_rate: float | None = None,
                 refresh: bool = False, sensitive: bool = False,
                 observe: Callable[..., None] | None = None,
                 before_request: Callable[[], None] | None = None,
-                headers_factory: Callable[[], Mapping] | None = None) -> Response:
+                headers_factory: Callable[[], Mapping] | None = None,
+                rate_weight: int = 1, actual_weight: Callable[[bytes], int] | None = None) -> Response:
         if method not in ("GET", "POST") or not path.startswith("/") or path.startswith("//") or "?" in path:
             raise ValueError("invalid source request")
         routes = {
+            "hyperliquid": (("POST", r"/info"),),
+            "fred": (("GET", r"/(?:series(?:/search|/observations|/vintagedates)?|v2/release/observations)"),),
+            "worldbank": (("GET", r"/country/[A-Za-z0-9;]+/indicator/[A-Za-z0-9._;\-]+"),
+                          ("GET", r"/indicator(?:/[A-Za-z0-9._;\-]+)?")),
+            "sec": (("GET", r"/submissions/CIK[0-9]{10}(?:-submissions-[0-9]+)?[.]json"),
+                    ("GET", r"/api/xbrl/companyfacts/CIK[0-9]{10}[.]json"),
+                    ("GET", r"/api/xbrl/companyconcept/CIK[0-9]{10}/[A-Za-z][A-Za-z0-9_.-]*/[A-Za-z][A-Za-z0-9_.-]*[.]json"),
+                    ("GET", r"/api/xbrl/frames/[A-Za-z][A-Za-z0-9_.-]*/[A-Za-z][A-Za-z0-9_.-]*/[A-Za-z0-9_-]+/CY[0-9]{4}(?:Q[1-4])?I?[.]json")),
+            "ecb": (("GET", r"/data/[A-Za-z][A-Za-z0-9_,.-]*(?:/[A-Za-z0-9_.+\-]*)?"),
+                    ("GET", r"/dataflow/ECB/all/latest")),
             "openalex": (("GET", r"/works(?:/.+)?"), ("GET", r"/rate-limit")),
             "europepmc": (("GET", r"/search"), ("POST", r"/searchPOST"),
                           ("GET", r"/PMC[0-9]+/fullTextXML")),
@@ -450,9 +511,22 @@ class Transport:
                 method == verb and re.fullmatch(pattern, path)
                 for verb, pattern in routes[self.source]):
             raise ValueError("source route is outside the read-only adapter")
+        if self.source == "hyperliquid":
+            from .hyperliquid import info_policy
+            if params or private_params or form is not None or auth is not None:
+                raise ValueError("Hyperliquid info requests use a public JSON body only")
+            rate_weight, actual_weight = info_policy(content)
+        if type(rate_weight) is not int or rate_weight < 1:
+            raise ValueError("rate_weight must be a positive integer")
         params = {str(k): str(v) for k, v in (params or {}).items()}
         if any(k.lower() in ("api_key", "access_token", "authorization") for k in params):
             raise ValueError("credentials must not appear in source parameters")
+        private_params = {str(k): str(v) for k, v in (private_params or {}).items()}
+        # FRED v1 only accepts a query key. Keep it out of public request identity
+        # and snapshots; the hashed credential namespace still isolates caches.
+        if private_params and (self.source != "fred" or set(private_params) != {"api_key"}
+                               or self.scope != "fred:" + digest(private_params["api_key"].encode())):
+            raise ValueError("private query credentials are restricted to FRED authentication")
         form = {str(k): str(v) for k, v in (form or {}).items()} if form is not None else None
         if form and any(k.lower() in ("api_key", "access_token", "authorization") for k in form):
             raise ValueError("credentials must not appear in source forms")
@@ -498,23 +572,45 @@ class Transport:
             limits = ((self.scope + ":all", self.rate),)
             if service_rate is not None:
                 limits += ((pace_scope, service_rate),)
-            self.store.pace_many(limits, self.sleep, self.max_wait)
-            credit_window = window("day", self.store.clock())
-            byte_window = window("week", self.store.clock())
-            credit_reservation = self.store.reserve(self.scope, "credits", estimated_credits,
-                                                    credit_limit, "day", window_key=credit_window)
-            byte_reservation = None
-            byte_reserved = self.max_response_bytes if byte_limit is not None else 0
-            try:
-                if byte_reserved:
-                    byte_reservation = self.store.reserve(self.scope, "bytes", byte_reserved,
-                                                          byte_limit, "week", window_key=byte_window)
-            except BudgetExceeded:
-                self.store.settle(credit_reservation, 0)
-                raise
+            admitted = {}
+
+            def reserve_budgets(db, now):
+                # IP capacity, pacing and these reservations commit together. No
+                # additional database lock can leave a queued dispatch lease stale.
+                while True:
+                    day, week = window("day", now), window("week", now)
+                    credit = self.store._reserve_in(db, self.scope, "credits", estimated_credits,
+                                                    credit_limit, "day", window_key=day)
+                    byte = (self.store._reserve_in(db, self.scope, "bytes", self.max_response_bytes,
+                                                  byte_limit, "week", window_key=week)
+                            if byte_limit is not None else None)
+                    fresh = self.store.clock()
+                    if day == window("day", fresh) and week == window("week", fresh):
+                        admitted.update(credit=credit, byte=byte, day=day, week=week)
+                        return
+                    # Reanchor if even the local transaction spans a quota reset.
+                    db.execute("DELETE FROM budget_reservations WHERE id=?", (credit,))
+                    if byte:
+                        db.execute("DELETE FROM budget_reservations WHERE id=?", (byte,))
+                    now = fresh
+
+            lease = None
+            if self.ip_pool is not None:
+                capacity, period = self.ip_limit or (None, 60.0)
+                lease = self.ip_pool.acquire(self.store, self.source, rate_weight, capacity,
+                                             period, self.sleep, self.max_wait, pacing=limits,
+                                             before_admit=reserve_budgets)
+            else:
+                self.store.pace_many(limits, self.sleep, self.max_wait, reserve_budgets)
+            active_client = lease.client if lease is not None else self.client
+            weight_stats = ({"ip_weight_reserved": rate_weight, "ip_weight_used": rate_weight}
+                            if lease is not None else {})
+            credit_window, byte_window = admitted["day"], admitted["week"]
+            credit_reservation, byte_reservation = admitted["credit"], admitted["byte"]
             started = self.store.clock()
             try:
-                with self.client.stream(method, url, params=params, headers=attempt_headers,
+                with active_client.stream(
+                                        method, url, params={**params, **private_params}, headers=attempt_headers,
                                         content=request_body, auth=auth,
                                         timeout=30, follow_redirects=False) as upstream:
                     received = bytearray()
@@ -531,7 +627,7 @@ class Transport:
                                     if k.lower() in PUBLIC_HEADERS}
             except httpx.HTTPError:
                 self.store.record(self.scope, requests=1, failures=1, credits_used=estimated_credits,
-                                  **{service + "_requests": 1})
+                                  **{service + "_requests": 1}, **weight_stats)
                 # An uncertain request may have been charged. Keep its reservations.
                 if attempt + 1 < self.max_attempts:
                     self.sleep(min(2 ** attempt, self.max_wait))
@@ -539,8 +635,20 @@ class Transport:
                 raise SourceError(f"{self.source}: transport failure") from None
             except InvalidResponse:
                 self.store.record(self.scope, requests=1, failures=1, credits_used=estimated_credits,
-                                  **{service + "_requests": 1})
+                                  **{service + "_requests": 1}, **weight_stats)
                 raise
+            if lease is not None and 200 <= status < 300 and actual_weight is not None:
+                try:
+                    used_weight = actual_weight(body)
+                    if type(used_weight) is not int or not 1 <= used_weight <= rate_weight:
+                        raise ValueError
+                except (ValueError, TypeError, UnicodeDecodeError):
+                    self.store.record(self.scope, requests=1, failures=1,
+                                      credits_used=estimated_credits,
+                                      **{service + "_requests": 1}, **weight_stats)
+                    raise InvalidResponse(f"{self.source}: invalid response weight") from None
+                self.ip_pool.settle(self.store, lease, used_weight)
+                weight_stats["ip_weight_used"] = used_weight
             try:
                 charged = int(safe_headers.get("x-ratelimit-credits-used", estimated_credits))
                 if charged < 0:
@@ -551,11 +659,16 @@ class Transport:
             if byte_reservation is not None:
                 self.store.settle(byte_reservation, wire)
             self.store.record(self.scope, requests=1, wire_bytes=wire, decoded_bytes=len(body),
-                              credits_used=charged, failures=int(status >= 400), **{service + "_requests": 1})
+                              credits_used=charged, failures=int(status >= 400),
+                              **{service + "_requests": 1}, **weight_stats)
             # Persist provider cooldowns even when the caller cannot wait or retry.
             # Budget rejection takes precedence in the error contract, never in pacing.
             retry_delay = max(2 ** attempt, self._retry_after(safe_headers.get("retry-after")))
-            if status == 429 or 500 <= status <= 599:
+            if status == 429 and lease is not None:
+                self.ip_pool.defer(self.store, self.source, lease.route, retry_delay)
+            if (500 <= status <= 599 or (status == 429 and (
+                    lease is None or not self.ip_throttle_only
+                    or safe_headers.get("x-ratelimit-remaining") == "0"))):
                 self.store.defer(self.scope + ":all", retry_delay)
             if observe:
                 observe(safe_headers, request_windows={"day": credit_window, "week": byte_window})
@@ -588,7 +701,9 @@ class Transport:
                            acquired, snapshot_id, license=self.license,
                            public_request_headers=identity["headers"],
                            request_body=request_body.decode("utf-8") if request_body is not None else None,
-                           completed_at_utc=utc_stamp(self.store.clock()))
+                           completed_at_utc=utc_stamp(self.store.clock()), http_status=status,
+                           egress_ip_sha256=(digest(lease.public_ip.encode())
+                                             if lease and lease.public_ip != "0.0.0.0" else None))
             response = Response(body, safe_headers, p, False, charged, wire)
             if not sensitive:
                 self.store.put(cache_key, response)
