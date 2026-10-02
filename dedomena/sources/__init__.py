@@ -4,8 +4,12 @@ from .core import (BudgetExceeded, InvalidResponse, Page, Provenance, SearchLimi
 from .openalex import OpenAlex
 from .europepmc import EuropePMC
 from .epo import EPO
+from .sec import SEC
+from .fred import FRED
+from .ecb import ECB
+from .worldbank import WorldBank
 
 __all__ = [
-    "OpenAlex", "EuropePMC", "EPO", "Page", "Provenance", "Store",
+    "OpenAlex", "EuropePMC", "EPO", "SEC", "FRED", "ECB", "WorldBank", "Page", "Provenance", "Store",
     "SourceError", "BudgetExceeded", "Throttled", "InvalidResponse", "SearchLimitExceeded",
 ]

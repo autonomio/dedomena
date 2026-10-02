@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -19,12 +20,13 @@ from urllib.parse import urlencode
 
 import httpx
 
-SCHEMA_VERSION = "0.4.0"
+SCHEMA_VERSION = "0.5.0"
 PUBLIC_HEADERS = {
     "content-type", "content-encoding", "x-ratelimit-limit", "x-ratelimit-remaining",
     "x-ratelimit-credits-used", "x-ratelimit-reset", "retry-after",
     "x-individualquotaperhour-used", "x-registeredquotaperweek-used",
     "x-registeredpayingquotaperweek-used", "x-throttling-control", "x-rejection-reason",
+    "etag", "last-modified", "date",
 }
 
 
@@ -91,6 +93,7 @@ class Provenance:
     public_request_headers: Mapping[str, str] | None = None
     request_body: str | None = None
     completed_at_utc: str | None = None
+    http_status: int | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -137,6 +140,20 @@ class Response:
             return body
         except (ValueError, UnicodeDecodeError):
             raise InvalidResponse(f"{self.provenance.source}: invalid JSON response") from None
+
+
+class _PrivateQueryLogFilter(logging.Filter):
+    # A stable filter avoids races caused by per-request filter removal. Redact
+    # the query field itself, so no credential registry or lifetime is needed.
+    def filter(self, record):
+        message = record.getMessage()
+        redacted = re.sub(r'([?&]api_key=)[^&\s"<>]+', r'\1[REDACTED]', message)
+        if redacted != message:
+            record.msg, record.args = redacted, ()
+        return True
+
+
+logging.getLogger("httpx").addFilter(_PrivateQueryLogFilter())
 
 
 class Store:
@@ -359,7 +376,8 @@ class Transport:
         return 0
 
     def _request(self, method: str, path: str, *, params: Mapping | None = None,
-                headers: Mapping | None = None, content: bytes | None = None,
+                headers: Mapping | None = None, private_params: Mapping | None = None,
+                content: bytes | None = None,
                 form: Mapping | None = None, auth=None, estimated_credits: int = 0,
                 credit_limit: int | None = None, byte_limit: int | None = None,
                 service: str = "requests", service_rate: float | None = None,
@@ -370,6 +388,15 @@ class Transport:
         if method not in ("GET", "POST") or not path.startswith("/") or path.startswith("//") or "?" in path:
             raise ValueError("invalid source request")
         routes = {
+            "fred": (("GET", r"/(?:series(?:/search|/observations|/vintagedates)?|v2/release/observations)"),),
+            "worldbank": (("GET", r"/country/[A-Za-z0-9;]+/indicator/[A-Za-z0-9._;\-]+"),
+                          ("GET", r"/indicator(?:/[A-Za-z0-9._;\-]+)?")),
+            "sec": (("GET", r"/submissions/CIK[0-9]{10}(?:-submissions-[0-9]+)?[.]json"),
+                    ("GET", r"/api/xbrl/companyfacts/CIK[0-9]{10}[.]json"),
+                    ("GET", r"/api/xbrl/companyconcept/CIK[0-9]{10}/[A-Za-z][A-Za-z0-9_.-]*/[A-Za-z][A-Za-z0-9_.-]*[.]json"),
+                    ("GET", r"/api/xbrl/frames/[A-Za-z][A-Za-z0-9_.-]*/[A-Za-z][A-Za-z0-9_.-]*/[A-Za-z0-9_-]+/CY[0-9]{4}(?:Q[1-4])?I?[.]json")),
+            "ecb": (("GET", r"/data/[A-Za-z][A-Za-z0-9_,.-]*(?:/[A-Za-z0-9_.+\-]*)?"),
+                    ("GET", r"/dataflow/ECB/all/latest")),
             "openalex": (("GET", r"/works(?:/.+)?"), ("GET", r"/rate-limit")),
             "europepmc": (("GET", r"/search"), ("POST", r"/searchPOST"),
                           ("GET", r"/PMC[0-9]+/fullTextXML")),
@@ -385,6 +412,12 @@ class Transport:
         params = {str(k): str(v) for k, v in (params or {}).items()}
         if any(k.lower() in ("api_key", "access_token", "authorization") for k in params):
             raise ValueError("credentials must not appear in source parameters")
+        private_params = {str(k): str(v) for k, v in (private_params or {}).items()}
+        # FRED v1 only accepts a query key. Keep it out of public request identity
+        # and snapshots; the hashed credential namespace still isolates caches.
+        if private_params and (self.source != "fred" or set(private_params) != {"api_key"}
+                               or self.scope != "fred:" + digest(private_params["api_key"].encode())):
+            raise ValueError("private query credentials are restricted to FRED authentication")
         form = {str(k): str(v) for k, v in (form or {}).items()} if form is not None else None
         if form and any(k.lower() in ("api_key", "access_token", "authorization") for k in form):
             raise ValueError("credentials must not appear in source forms")
@@ -442,7 +475,8 @@ class Transport:
                 raise
             started = self.store.clock()
             try:
-                with self.client.stream(method, url, params=params, headers=attempt_headers,
+                with self.client.stream(
+                                        method, url, params={**params, **private_params}, headers=attempt_headers,
                                         content=request_body, auth=auth,
                                         timeout=30, follow_redirects=False) as upstream:
                     received = bytearray()
@@ -512,7 +546,7 @@ class Transport:
                            acquired, snapshot_id, license=self.license,
                            public_request_headers=identity["headers"],
                            request_body=request_body.decode("utf-8") if request_body is not None else None,
-                           completed_at_utc=utc_stamp(self.store.clock()))
+                           completed_at_utc=utc_stamp(self.store.clock()), http_status=status)
             response = Response(body, safe_headers, p, False, charged, wire)
             if not sensitive:
                 self.store.put(cache_key, response)
