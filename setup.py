@@ -5,8 +5,9 @@
 DESCRIPTION = "Reproducible research data sources for agents and scientists"
 LONG_DESCRIPTION = """\
 Dedomena provides compact, high-throughput access to research and finance data:
-OpenAlex, Europe PMC, EPO, SEC EDGAR, FRED/ALFRED, ECB and World Bank.
+OpenAlex, Europe PMC, EPO, SEC EDGAR, FRED/ALFRED, ECB, World Bank and Hyperliquid.
 Every source shares consistent provenance, durable caching and replay.
+Reusable IP pools coordinate weighted egress limits across sources.
 Legacy dataset and API functions remain available through the legacy extra.
 """
 
@@ -16,7 +17,7 @@ MAINTAINER_EMAIL = 'mailme@mikkokotila.com'
 URL = 'http://autonom.io'
 LICENSE = 'MIT'
 DOWNLOAD_URL = 'https://github.com/autonomio/dedomena/'
-VERSION = '0.5.0'
+VERSION = '0.6.0'
 
 try:
     from setuptools import setup
