@@ -55,7 +55,10 @@ class ECB(Transport):
         params = {"format": "csvdata", "detail": detail,
                   "includeHistory": str(include_history).lower()}
         start, end = self._period(start_period), self._period(end_period)
-        if start and end and len(start) == len(end) and start > end:
+        # Lexical order is chronological only within the same SDMX format.
+        # Preserve mixed-frequency bounds for the provider to interpret.
+        if (start and end and re.sub(r"[0-9]", "", start) == re.sub(r"[0-9]", "", end)
+                and start > end):
             raise ValueError("start_period must not follow end_period")
         if start:
             params["startPeriod"] = start

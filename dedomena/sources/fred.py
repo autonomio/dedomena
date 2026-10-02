@@ -200,13 +200,15 @@ class FRED(Transport):
 
         page_size counts observations; Page.records counts native series fragments.
         A series can span pages. ALFRED observations(as_of=...) is the dated route.
+        Resume with both next_cursor and records_seen from the last delivered page.
         """
         positive_int(release_id, 2_147_483_647, "release_id")
         positive_int(page_size, self.MAX_RELEASE_OBSERVATIONS, "page_size")
         if (cursor is not None and (not isinstance(cursor, str) or not cursor)
                 or type(records_seen) is not int or records_seen < 0
+                or (cursor is None and records_seen != 0)
                 or (cursor is not None and not records_seen)):
-            raise ValueError("cursor resume requires positive records_seen")
+            raise ValueError("cursor and positive records_seen must be supplied together")
         params = {"release_id": release_id, "format": "json", "limit": page_size}
         if cursor is not None:
             params["next_cursor"] = cursor

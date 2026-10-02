@@ -62,17 +62,30 @@ def test_discovery_retains_series_attributes_without_values():
 
 
 @pytest.mark.parametrize("body", [
-    "KEY,TIME_PERIOD,OBS_VALUE\nEXR.M.USD,2025-01\n",
-    "KEY,TIME_PERIOD,OBS_VALUE\nOTHER.M.USD,2025-01,1\n",
-    "KEY,TIME_PERIOD,OBS_VALUE\nEXR.M.USD,,1\n",
-    "KEY,TIME_PERIOD,OBS_VALUE\nEXR.M.USD,2025-01,1,extra\n",
-    "KEY,KEY,TIME_PERIOD,OBS_VALUE\nEXR.M.USD,EXR.M.USD,2025-01,1\n",
+    "KEY,TIME_PERIOD,OBS_VALUE\nEXR.M.USD.EUR.SP00.A,2025-01\n",
+    "KEY,TIME_PERIOD,OBS_VALUE\nEXR.M.USD.EUR.SP00.A,,1\n",
+    "KEY,TIME_PERIOD,OBS_VALUE\nEXR.M.USD.EUR.SP00.A,2025-01,1,extra\n",
+    "KEY,KEY,TIME_PERIOD,OBS_VALUE\nEXR.M.USD.EUR.SP00.A,EXR.M.USD.EUR.SP00.A,2025-01,1\n",
     '{"error":"unexpected format"}',
-])
-def test_malformed_and_wrong_dataset_fail(body):
+], ids=["missing_value", "empty_period", "extra_column", "duplicate_header", "wrong_format"])
+def test_malformed_observations_fail_with_matching_series_identity(body):
     with source(lambda _: httpx.Response(200, text=body)) as ecb:
         with pytest.raises(InvalidResponse):
             ecb.fetch("EXR/M.USD.EUR.SP00.A")
+
+
+def test_foreign_dataset_fails_when_no_dimension_filter_can_mask_it():
+    body = "KEY,TIME_PERIOD,OBS_VALUE\nOTHER.M.USD.EUR.SP00.A,2025-01,1\n"
+    with source(lambda _: httpx.Response(200, text=body)) as ecb:
+        with pytest.raises(InvalidResponse):
+            ecb.observations("EXR")
+
+
+def test_valid_observation_control_for_malformed_csv_cases():
+    body = "KEY,TIME_PERIOD,OBS_VALUE\nEXR.M.USD.EUR.SP00.A,2025-01,1\n"
+    with source(lambda _: httpx.Response(200, text=body)) as ecb:
+        page = ecb.fetch("EXR/M.USD.EUR.SP00.A")
+        assert page.complete and page.records[0]["OBS_VALUE"] == "1"
 
 
 @pytest.mark.parametrize("kwargs", [
@@ -182,3 +195,39 @@ def test_httpx_redaction_replaces_entire_parameter_and_keeps_url_shape(secret):
     assert record.getMessage() == (
         'HTTP Request: GET https://api.stlouisfed.org/fred/series?api_key='
         '[REDACTED]&series_id=GDP "HTTP/1.1 200 OK"')
+
+
+@pytest.mark.parametrize("start,end", [
+    ("2025-Q1", "2025-12"),
+    ("2025-S2", "2025-Q4"),
+    ("2025-W01", "2025-01"),
+    ("2025-01", "2025-Q4"),
+    ("2025-01-01", "2025-12"),
+])
+def test_mixed_period_formats_are_forwarded_verbatim(start, end):
+    def handler(request):
+        assert request.url.params["startPeriod"] == start
+        assert request.url.params["endPeriod"] == end
+        return httpx.Response(200, text=(
+            "KEY,TIME_PERIOD,OBS_VALUE\nEXR.M.USD.EUR.SP00.A,2025-12,1\n"))
+    with source(handler) as ecb:
+        page = ecb.observations("EXR", "M.USD.EUR.SP00.A",
+                                start_period=start, end_period=end)
+        assert page.complete
+        assert page.provenance.parameters["startPeriod"] == start
+        assert page.provenance.parameters["endPeriod"] == end
+
+
+@pytest.mark.parametrize("start,end", [
+    ("2025", "2024"),
+    ("2025-S2", "2025-S1"),
+    ("2025-Q4", "2025-Q1"),
+    ("2025-12", "2025-01"),
+    ("2025-W52", "2025-W01"),
+    ("2025-12-01", "2025-01-01"),
+])
+def test_reversed_periods_of_the_same_format_fail_before_network(start, end):
+    with source(lambda _: pytest.fail("unexpected network")) as ecb:
+        with pytest.raises(ValueError, match="start_period"):
+            ecb.observations("EXR", "M.USD.EUR.SP00.A",
+                             start_period=start, end_period=end)

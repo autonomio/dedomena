@@ -126,8 +126,11 @@ class WorldBank(Transport):
         """
         indicators = self._codes(query, "indicators", maximum=self.MAX_INDICATORS)
         countries = self._codes(countries, "countries")
-        if "all" in countries and countries != ["all"]:
-            raise ValueError("all cannot be combined with country codes")
+        all_countries = any(code.upper() == "ALL" for code in countries)
+        if all_countries:
+            if len(countries) != 1:
+                raise ValueError("all cannot be combined with country codes")
+            countries = ["all"]
         positive_int(source, 2_147_483_647, "source")
         if type(footnotes) is not bool:
             raise ValueError("footnotes must be boolean")
@@ -146,7 +149,7 @@ class WorldBank(Transport):
                     or not country["id"] or not isinstance(row.get("date"), str)
                     or "value" not in row):
                 raise InvalidResponse("worldbank: observation lacks requested indicator or identity")
-            if "ALL" not in selected_countries:
+            if not all_countries:
                 actual = {country["id"].upper(), str(row.get("countryiso3code", "")).upper()}
                 if not actual.intersection(selected_countries):
                     raise InvalidResponse("worldbank: response contains an unrequested country")

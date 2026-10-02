@@ -98,6 +98,8 @@ V2 release pages contain series fragments, metadata and observations. A series
 may span pages. `page_size` counts observations; `Page.records`, `records_seen`
 and CLI `records` count series fragments. Usage separately tracks
 `observations_delivered`. Resume v1 with offset/records_seen, v2 with cursor/records_seen.
+V2 requires both checkpoint parts together; initial retrieval uses no cursor and zero
+records seen.
 A repeated series changing version during traversal fails explicitly; different
 series can still have mixed update times. V2 serves latest release data rather
 than an ALFRED vintage. The raw envelope retains release/source metadata.
@@ -125,7 +127,9 @@ with ECB() as ecb:
 General `observations(flow, key)` preserves native SDMX keys, blank wildcards
 and `+` unions. CSV strings preserve precision, units, `UNIT_MULT`, status and
 every returned attribute. No scaling, currency inversion or imputation occurs.
-`series` returns keys/attributes without observation payloads.
+`series` returns keys/attributes without observation payloads. Date bounds retain
+their native SDMX formats. Reversed bounds of the same format fail locally; mixed
+formats are forwarded unchanged for the provider to interpret.
 
 `last_n` selects observations separately per series. `updated_after` deltas can
 include additions, revisions and deletions: reconcile with prior data.
@@ -155,7 +159,8 @@ with WorldBank() as wb:
 `search`/`observations` return values, defaulting to WDI (source 2); select other
 datasets with numeric `source`. IDs, dates, units, decimals, nulls and requested
 footnotes remain native. `countries="all"` includes regional/income aggregates;
-those are not independent countries. Fetch units/source notes before comparison.
+those are not independent countries. The wildcard is case-insensitive and cannot
+be combined with country codes. Fetch units/source notes before comparison.
 Current revised indicators do not supply historical vintages.
 
 Count, page size and update metadata are checked across pages. Resume with numeric
