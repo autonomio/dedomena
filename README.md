@@ -1,80 +1,79 @@
-<h1 align="center">
-  <br>
-  <a href="http://autonom.io"><img src="https://raw.githubusercontent.com/autonomio/dedomena/master/logo.png" alt="Dedomena"></a>
-  <br>
-</h1>
+# Dedomena
 
-<h3 align="center">A high-level data API for deep learning and data science.</h3>
+Consistent research data access for agents and scientists, starting with biology.
+OpenAlex, Europe PMC (including PubMed), and EPO patent data share a streaming page
+and provenance contract. Queries retain their native source semantics.
 
-<p align="center">
+## Install
 
-  <a href="https://travis-ci.org/autonomio/dedomena">
-    <img src="https://img.shields.io/travis/autonomio/dedomena/master.svg?style=for-the-badge&logo=appveyor" alt="Signs Travis">
-  </a>
+Python 3.10 or later:
 
-  <a href="https://coveralls.io/github/autonomio/dedomena">
-    <img src="https://img.shields.io/coveralls/github/autonomio/dedomena.svg?style=for-the-badge&logo=appveyor" alt="Signs Coveralls">
-  </a>
+~~~sh
+pip install .
+~~~
 
-</p>
+The core requires only HTTPX and defusedxml. Historical dataset/API functions remain
+available with `pip install '.[legacy]'`.
 
-<p align="center">
-  <a href="#Key-Features">Dedomena</a> •
-  <a href="#Key-Features">Key Features</a> •
-  <a href="#Examples">Examples</a> •
-  <a href="#Install">Install</a> •
-  <a href="#Support">Support</a> •
-  <a href="https://autonomio.github.io/docs_dedomena">Docs</a> •
-  <a href="https://github.com/autonomio/dedomena/issues">Issues</a> •
-  <a href="#License">License</a> •
-  <a href="https://github.com/autonomio/dedomena/archive/master.zip">Download</a>
-</p>
-<hr>
-<p align="center">
-A very high level API for accessing datasets, data APIs, and for generating synthetic and random datasets for deep learning and other research purposes.
+## Research sources
 
-### Dedomena
+~~~python
+from dedomena.sources import OpenAlex, EuropePMC, EPO
 
-Dedomena is a very high level API for accessing datasets, data APIs, and for generating synthetic and random datasets for deep learning and other research purposes. Dedomena provides an easy-to-use and remember three level namespace to 'datasets', 'apis', and 'generators'.
+with OpenAlex() as source:  # OPENALEX_API_KEY
+    for page in source.search('CRISPR AND biology'):
+        consume(page.records, page.provenance.to_dict())
 
-### Key Features
+with EuropePMC() as source:  # 1,000 records per request, no key
+    for page in source.search('TITLE:CRISPR'):
+        consume(page.records, page.provenance.to_dict())
 
-Instant access to thousands of datasets through a single interface.
+with EPO() as source:  # EPO_OPS_KEY and EPO_OPS_SECRET
+    for page in source.search('ta="CRISPR"'):
+        consume(page.records, page.provenance.to_dict())
+~~~
 
-- Twitter API [info](https://github.com/mikkokotila/twint)
-- Autonomio Datasets [info](https://github.com/autonomio/datasets)
-- Pandas datareader [info](https://pandas-datareader.readthedocs.io/en/latest/#id1)
-- PMLB [info](https://github.com/EpistasisLab/penn-ml-benchmarks)
-- MIMIC-III^^ [info](https://mimic.physionet.org/)
+`consume` represents your application's page consumer. Every page includes stable
+source identifiers, exact request provenance, SHA-256 hashes, a saved-response
+snapshot ID, retrieval times, completeness, cost and transfer size. Partial
+enumeration fails explicitly. Native records retain source-specific fields.
 
-^^Requires approval for access.
+Default caches persist for 24 hours at `~/.cache/dedomena/sources.sqlite3`.
+`refresh=True` fetches new data while keeping previous snapshots for offline replay.
+`DEDOMENA_SOURCE_STORE` selects a shared store, including across Canary workers.
 
-### Examples
-    import dedomena as da
-    # get a specific dataset from a provider
-    da.datasets.autonomio('icu_mortality')
+## Agent CLI
 
-    # see all the datasets under a provider
-    da.datasets.autonomio()
+~~~sh
+python -m dedomena.sources benchmark openalex 'CRISPR'
+python -m dedomena.sources benchmark europepmc 'TITLE:CRISPR'
+python -m dedomena.sources search epo 'ta="CRISPR"' --max-pages 1
+python -m dedomena.sources quota openalex
+~~~
 
+Benchmarks default to one page; `--max-pages` controls acquisition explicitly.
+Search streams JSON pages and a final receipt. Source failures emit structured
+JSON to stderr with a nonzero exit status. Credentials stay in environment variables.
 
-### Install
+See [source limits, usage and Canary integration](docs/SOURCES.md).
+Downstream services can expose these same clients to their agents.
 
-Stable version:
+## Legacy API
 
-#### `pip install dedomena`
+~~~python
+import dedomena as da
+data = da.datasets.autonomio('icu_mortality')
+~~~
 
-Daily development version:
+Legacy `datasets`, `apis`, and `generators` namespaces remain available; legacy
+adapters retain their historical behavior. New source guarantees apply to `sources`.
 
-#### `pip install git+https://github.com/autonomio/dedomena`
+## Verification
 
-### Support
+~~~sh
+pip install . 'pytest>=8,<9'
+python -m pytest -q tests
+~~~
 
-If you want ask a **"how can I use Signs to..."** question, the right place is [StackOverflow](https://stackoverflow.com/questions/ask).
-
-If you found a bug or want to suggest a feature, check the [issues](https://github.com/autonomio/dedomena/issues) or [create](https://github.com/autonomio/dedomena/issues/new/choose) a new issue.
-
-
-### License
-
-[MIT License](https://github.com/autonomio/dedomena/blob/master/LICENSE)
+CI runs offline provider contracts on Python 3.10, 3.12 and 3.13.
+[MIT license](LICENSE).

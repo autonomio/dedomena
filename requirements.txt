@@ -1,5 +1,2 @@
-pandas
-pymed
-twintel
-pmlb
-xmltodict
+httpx>=0.27,<1
+defusedxml>=0.7,<1
