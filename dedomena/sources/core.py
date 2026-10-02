@@ -14,6 +14,7 @@ from pathlib import Path
 import sqlite3
 import threading
 import time
+import uuid
 from typing import Callable, Iterator, Mapping
 from urllib.parse import urlencode
 
@@ -165,7 +166,16 @@ class Store:
             CREATE TABLE IF NOT EXISTS budgets(
                 scope TEXT NOT NULL, unit TEXT NOT NULL, window TEXT NOT NULL,
                 used INTEGER NOT NULL, PRIMARY KEY(scope, unit, window));
+            CREATE TABLE IF NOT EXISTS budget_observations(
+                scope TEXT NOT NULL, unit TEXT NOT NULL, window TEXT NOT NULL,
+                used INTEGER NOT NULL, PRIMARY KEY(scope, unit, window));
+            CREATE TABLE IF NOT EXISTS budget_reservations(
+                id TEXT PRIMARY KEY, scope TEXT NOT NULL, unit TEXT NOT NULL,
+                window TEXT NOT NULL, amount INTEGER NOT NULL);
+            CREATE INDEX IF NOT EXISTS reservations_by_window
+                ON budget_reservations(scope, unit, window);
             CREATE TABLE IF NOT EXISTS pacing(scope TEXT PRIMARY KEY, next_at REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS cooldowns(scope TEXT PRIMARY KEY, until REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS throttles(scope TEXT NOT NULL, rate REAL NOT NULL, expires REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS stats(
                 scope TEXT NOT NULL, day TEXT NOT NULL, name TEXT NOT NULL, value INTEGER NOT NULL,
@@ -223,30 +233,73 @@ class Store:
             raise KeyError(snapshot_id)
         return self._response(row, cache_hit=True)
 
+    @staticmethod
+    def _budget(db, scope: str, unit: str, key: str) -> tuple[int, int]:
+        args = (scope, unit, key)
+        local = db.execute("SELECT used FROM budgets WHERE scope=? AND unit=? AND window=?", args).fetchone()
+        observed = db.execute("SELECT used FROM budget_observations WHERE scope=? AND unit=? AND window=?",
+                              args).fetchone()
+        pending = db.execute("SELECT coalesce(sum(amount),0) FROM budget_reservations "
+                             "WHERE scope=? AND unit=? AND window=?", args).fetchone()[0]
+        return max(local[0] if local else 0, observed[0] if observed else 0), pending
+
+    @staticmethod
+    def _set_budget(db, scope: str, unit: str, key: str, used: int):
+        db.execute("""INSERT INTO budgets VALUES(?,?,?,?)
+            ON CONFLICT(scope,unit,window) DO UPDATE SET used=excluded.used""",
+                   (scope, unit, key, used))
+
     def charge(self, scope: str, unit: str, amount: int, limit: int | None, period: str,
                *, window_key: str | None = None):
         key = window_key or window(period, self.clock())
         with self.transaction() as db:
-            row = db.execute("SELECT used FROM budgets WHERE scope=? AND unit=? AND window=?",
-                             (scope, unit, key)).fetchone()
-            used = row[0] if row else 0
-            if limit is not None and amount > 0 and used + amount > limit:
+            baseline, pending = self._budget(db, scope, unit, key)
+            if limit is not None and amount > 0 and baseline + pending + amount > limit:
                 raise BudgetExceeded(f"{scope.split(':')[0]}: {period} {unit} allowance exhausted")
-            db.execute("""INSERT INTO budgets VALUES(?,?,?,?)
-                ON CONFLICT(scope,unit,window) DO UPDATE SET used=excluded.used""",
-                       (scope, unit, key, max(0, used + amount)))
+            # A local adjustment never modifies the separate provider high-water mark.
+            self._set_budget(db, scope, unit, key, max(0, baseline + amount))
 
-    def observe_used(self, scope: str, unit: str, used: int, period: str):
+    def reserve(self, scope: str, unit: str, amount: int, limit: int | None, period: str,
+                *, window_key: str) -> str:
+        """Reserve atomically without mixing refundable estimates with provider usage."""
+        reservation = uuid.uuid4().hex
         with self.transaction() as db:
-            db.execute("""INSERT INTO budgets VALUES(?,?,?,?)
+            baseline, pending = self._budget(db, scope, unit, window_key)
+            if limit is not None and baseline + pending + amount > limit:
+                raise BudgetExceeded(f"{scope.split(':')[0]}: {period} {unit} allowance exhausted")
+            db.execute("INSERT INTO budget_reservations VALUES(?,?,?,?,?)",
+                       (reservation, scope, unit, window_key, amount))
+        return reservation
+
+    def settle(self, reservation: str, actual: int):
+        """Replace one reservation with cost, retaining every other worker's estimate.
+
+        An out-of-order provider total may already include this response. Without a
+        provider coverage watermark, count its cost conservatively above that floor.
+        Actual local costs remain separately available in request statistics.
+        """
+        with self.transaction() as db:
+            row = db.execute("SELECT scope,unit,window FROM budget_reservations WHERE id=?",
+                             (reservation,)).fetchone()
+            if row is None:
+                raise ValueError("unknown budget reservation")
+            scope, unit, key = row
+            baseline, _ = self._budget(db, scope, unit, key)
+            self._set_budget(db, scope, unit, key, baseline + actual)
+            db.execute("DELETE FROM budget_reservations WHERE id=?", (reservation,))
+
+    def observe_used(self, scope: str, unit: str, used: int, period: str,
+                     *, window_key: str | None = None):
+        key = window_key or window(period, self.clock())
+        with self.transaction() as db:
+            db.execute("""INSERT INTO budget_observations VALUES(?,?,?,?)
                 ON CONFLICT(scope,unit,window) DO UPDATE SET used=max(used,excluded.used)""",
-                       (scope, unit, window(period, self.clock()), used))
+                       (scope, unit, key, used))
 
     def used(self, scope: str, unit: str, period: str) -> int:
         with self._lock:
-            row = self._db.execute("SELECT used FROM budgets WHERE scope=? AND unit=? AND window=?",
-                                   (scope, unit, window(period, self.clock()))).fetchone()
-        return row[0] if row else 0
+            baseline, pending = self._budget(self._db, scope, unit, window(period, self.clock()))
+        return baseline + pending
 
     def record(self, scope: str, **values: int):
         with self.transaction() as db:
@@ -269,24 +322,39 @@ class Store:
             db.execute("INSERT INTO throttles VALUES(?,?,?)", (scope, rate, self.clock() + 60))
 
     def pace(self, scope: str, rate: float, sleep: Callable[[float], None], max_wait: float):
-        now = self.clock()
-        with self.transaction() as db:
-            db.execute("DELETE FROM throttles WHERE expires<=?", (now,))
-            row = db.execute("SELECT min(rate) FROM throttles WHERE scope=?", (scope,)).fetchone()
-            rate = min(rate, row[0]) if row[0] else rate
-            row = db.execute("SELECT next_at FROM pacing WHERE scope=?", (scope,)).fetchone()
-            due = max(now, row[0]) if row else now
-            delay = due - now
-            if delay > max_wait:
-                raise Throttled(scope.split(":")[0], delay)
-            db.execute("INSERT OR REPLACE INTO pacing VALUES(?,?)", (scope, due + 1 / rate))
-        if delay:
+        self.pace_many(((scope, rate),), sleep, max_wait)
+
+    def pace_many(self, limits: tuple[tuple[str, float], ...],
+                  sleep: Callable[[float], None], max_wait: float):
+        """Admit all rate scopes together; waiters acquire no stale future dispatch slots."""
+        began = self.clock()
+        while True:
+            with self.transaction() as db:
+                now = self.clock()
+                db.execute("DELETE FROM throttles WHERE expires<=?", (now,))
+                due, rates = now, []
+                for scope, rate in limits:
+                    row = db.execute("SELECT min(rate) FROM throttles WHERE scope=?", (scope,)).fetchone()
+                    effective = min(rate, row[0]) if row[0] else rate
+                    row = db.execute("SELECT next_at FROM pacing WHERE scope=?", (scope,)).fetchone()
+                    cooldown = db.execute("SELECT until FROM cooldowns WHERE scope=?", (scope,)).fetchone()
+                    due = max(due, row[0] if row else now, cooldown[0] if cooldown else now)
+                    rates.append((scope, effective))
+                delay = due - now
+                if delay > max(0, max_wait - (now - began)):
+                    raise Throttled(limits[0][0].split(":")[0], delay)
+                if not delay:
+                    for scope, rate in rates:
+                        db.execute("INSERT OR REPLACE INTO pacing VALUES(?,?)", (scope, now + 1 / rate))
+                    return
+            # Another worker can update rates/cooldowns while this worker sleeps.
+            # Recheck every scope atomically after waking, immediately before admission.
             sleep(delay)
 
     def defer(self, scope: str, seconds: float):
         with self.transaction() as db:
-            db.execute("""INSERT INTO pacing VALUES(?,?)
-                ON CONFLICT(scope) DO UPDATE SET next_at=max(next_at,excluded.next_at)""",
+            db.execute("""INSERT INTO cooldowns VALUES(?,?)
+                ON CONFLICT(scope) DO UPDATE SET until=max(until,excluded.until)""",
                        (scope, self.clock() + seconds))
 
 
@@ -364,7 +432,7 @@ class Transport:
                 credit_limit: int | None = None, byte_limit: int | None = None,
                 service: str = "requests", service_rate: float | None = None,
                 refresh: bool = False, sensitive: bool = False,
-                observe: Callable[[Mapping], None] | None = None,
+                observe: Callable[..., None] | None = None,
                 before_request: Callable[[], None] | None = None,
                 headers_factory: Callable[[], Mapping] | None = None) -> Response:
         if method not in ("GET", "POST") or not path.startswith("/") or path.startswith("//") or "?" in path:
@@ -425,20 +493,24 @@ class Transport:
             public_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
         pace_scope = self.scope + ":" + service
         for attempt in range(self.max_attempts):
-            self.store.pace(self.scope + ":all", self.rate, self.sleep, self.max_wait)
-            if service_rate is not None:
-                self.store.pace(pace_scope, service_rate, self.sleep, self.max_wait)
+            # Resolve potentially blocking OAuth/token locks before acquiring dispatch slots.
             attempt_headers = {**public_headers, **(headers_factory() if headers_factory else {})}
+            limits = ((self.scope + ":all", self.rate),)
+            if service_rate is not None:
+                limits += ((pace_scope, service_rate),)
+            self.store.pace_many(limits, self.sleep, self.max_wait)
             credit_window = window("day", self.store.clock())
             byte_window = window("week", self.store.clock())
-            self.store.charge(self.scope, "credits", estimated_credits, credit_limit, "day",
-                              window_key=credit_window)
+            credit_reservation = self.store.reserve(self.scope, "credits", estimated_credits,
+                                                    credit_limit, "day", window_key=credit_window)
+            byte_reservation = None
             byte_reserved = self.max_response_bytes if byte_limit is not None else 0
             try:
                 if byte_reserved:
-                    self.store.charge(self.scope, "bytes", byte_reserved, byte_limit, "week", window_key=byte_window)
+                    byte_reservation = self.store.reserve(self.scope, "bytes", byte_reserved,
+                                                          byte_limit, "week", window_key=byte_window)
             except BudgetExceeded:
-                self.store.charge(self.scope, "credits", -estimated_credits, None, "day", window_key=credit_window)
+                self.store.settle(credit_reservation, 0)
                 raise
             started = self.store.clock()
             try:
@@ -475,23 +547,27 @@ class Transport:
                     raise ValueError
             except ValueError:
                 charged = estimated_credits
-            self.store.charge(self.scope, "credits", charged - estimated_credits, None, "day", window_key=credit_window)
-            if byte_reserved:
-                self.store.charge(self.scope, "bytes", wire - byte_reserved, None, "week", window_key=byte_window)
+            self.store.settle(credit_reservation, charged)
+            if byte_reservation is not None:
+                self.store.settle(byte_reservation, wire)
             self.store.record(self.scope, requests=1, wire_bytes=wire, decoded_bytes=len(body),
                               credits_used=charged, failures=int(status >= 400), **{service + "_requests": 1})
+            # Persist provider cooldowns even when the caller cannot wait or retry.
+            # Budget rejection takes precedence in the error contract, never in pacing.
+            retry_delay = max(2 ** attempt, self._retry_after(safe_headers.get("retry-after")))
+            if status == 429 or 500 <= status <= 599:
+                self.store.defer(self.scope + ":all", retry_delay)
             if observe:
-                observe(safe_headers)
+                observe(safe_headers, request_windows={"day": credit_window, "week": byte_window})
             if status in (403, 429) and (safe_headers.get("x-ratelimit-remaining") == "0"
                                         or safe_headers.get("x-rejection-reason")):
                 raise BudgetExceeded(f"{self.source}: provider allowance exhausted")
             if status == 429 or status == 503 or 500 <= status <= 599:
-                delay = max(2 ** attempt, self._retry_after(safe_headers.get("retry-after")))
+                delay = retry_delay
                 if delay > self.max_wait or attempt + 1 == self.max_attempts:
                     if status == 429:
                         raise Throttled(self.source, delay)
                     raise HTTPFailure(self.source, status)
-                self.store.defer(self.scope + ":all", delay)
                 continue
             if status < 200 or status >= 300:
                 raise HTTPFailure(self.source, status)

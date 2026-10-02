@@ -51,7 +51,15 @@ class OpenAlex(Transport):
     def _headers(self):
         return {"Authorization": "Bearer " + self.api_key} if self.api_key else {}
 
-    def _observe(self, headers):
+    def _selected_fields(self, fields, required=("id",)):
+        selected = FIELDS[self.profile] if fields is None else fields
+        if not isinstance(selected, str) or not selected.strip():
+            raise ValueError("fields must be a nonempty string or None")
+        if not set(required).issubset(selected.split(",")):
+            raise ValueError("selected fields must retain exact identity")
+        return selected
+
+    def _observe(self, headers, *, request_windows=None):
         try:
             remaining = int(headers["x-ratelimit-remaining"])
             limit = int(headers["x-ratelimit-limit"])
@@ -60,7 +68,8 @@ class OpenAlex(Transport):
         if remaining >= 0 and limit >= remaining:
             # For larger paid allowances, maintain this client's separate spending cap.
             observed = max(0, min(limit, self.daily_credit_limit) - remaining)
-            self.store.observe_used(self.scope, "credits", observed, "day")
+            self.store.observe_used(self.scope, "credits", observed, "day",
+                                    window_key=(request_windows or {}).get("day"))
 
     def quota(self) -> dict:
         """Read authoritative key allowance without persisting the echoed API key."""
@@ -85,7 +94,8 @@ class OpenAlex(Transport):
         limit = result.get("credits_limit")
         if type(remaining) is not int or type(limit) is not int:
             raise InvalidResponse("openalex: quota lacks integer credit allowance")
-        self._observe({"x-ratelimit-remaining": str(remaining), "x-ratelimit-limit": str(limit)})
+        self._observe({"x-ratelimit-remaining": str(remaining), "x-ratelimit-limit": str(limit)},
+                      request_windows={"day": response.provenance.retrieved_at_utc[:10]})
         return result
 
     def _ensure_quota(self):
@@ -121,9 +131,7 @@ class OpenAlex(Transport):
             raise ValueError("provide query or filter; use the snapshot for entire-corpus ingestion")
         if corpus not in ("default", "all"):
             raise ValueError("corpus must be default or all")
-        params = {"per_page": str(page_size), "select": fields or FIELDS[self.profile], "cursor": cursor}
-        if "id" not in params["select"].split(","):
-            raise ValueError("selected fields must include id")
+        params = {"per_page": str(page_size), "select": self._selected_fields(fields), "cursor": cursor}
         if query is not None:
             params["search"] = query
         if filter is not None:
@@ -180,14 +188,20 @@ class OpenAlex(Transport):
     def fetch(self, identifier: str, *, fields: str | None = None, refresh: bool = False) -> Page:
         """Exact ID/DOI lookup costs zero credits; rate and cache limits still apply."""
         ident = self._identifier(identifier)
-        selected = fields or FIELDS[self.profile]
         required = {"id", "doi"} if ident.startswith("doi:") else {"id"}
-        if not required.issubset(selected.split(",")):
-            raise ValueError("selected fields must retain exact identity")
+        selected = self._selected_fields(fields, required)
         response = self._request("GET", "/works/" + quote(ident, safe=":/"),
                                 params={"select": selected},
                                 headers=self._headers(), refresh=refresh, observe=self._observe, service="singleton")
-        if response.credits_used:
+        # Cache hits cost nothing now, but retain the original provider billing header.
+        # Refuse a response billed on acquisition on every read, including cached reads.
+        try:
+            acquired_credits = int(response.headers.get("x-ratelimit-credits-used", response.credits_used))
+            if acquired_credits < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise InvalidResponse("openalex: invalid exact lookup billing header") from None
+        if response.credits_used or acquired_credits:
             raise InvalidResponse("openalex: exact lookup unexpectedly charged credits")
         row = response.json()
         if not isinstance(row.get("id"), str) or not re.fullmatch(r"https://openalex.org/W[1-9][0-9]*", row["id"]):
@@ -202,6 +216,7 @@ class OpenAlex(Transport):
                    fields: str | None = None, refresh: bool = False) -> Iterator[Page]:
         """Bounded parallel zero-credit lookup, preserving caller order and O(workers) memory."""
         positive_int(workers, 100, "workers")
+        self._selected_fields(fields)
         with ThreadPoolExecutor(max_workers=workers) as pool:
             for batch in chunks(identifiers, workers):
                 by_id = {}
@@ -216,6 +231,7 @@ class OpenAlex(Transport):
     def fetch_batch(self, identifiers: Iterable[str], *, fields: str | None = None,
                     refresh: bool = False) -> Iterator[Page]:
         """Up to 100 work IDs per one-credit call when HTTP request count matters most."""
+        self._selected_fields(fields)
         for batch in chunks(identifiers, 100):
             ids = [self._identifier(value) for value in batch]
             if any(not value.startswith("W") for value in ids):
