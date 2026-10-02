@@ -1,7 +1,7 @@
 # Dedomena
 
 Consistent research data access for agents and scientists across biology and finance.
-OpenAlex, Europe PMC, EPO, SEC EDGAR, FRED/ALFRED, ECB and World Bank share a
+OpenAlex, Europe PMC, EPO, SEC EDGAR, FRED/ALFRED, ECB, World Bank and Hyperliquid share a
 streaming page and provenance contract. Queries retain their native source semantics.
 
 ## Install
@@ -38,7 +38,7 @@ source identifiers, exact request provenance, SHA-256 hashes, a saved-response
 snapshot ID, retrieval times, completeness, cost and transfer size. Partial
 enumeration fails explicitly. Native records retain source-specific fields.
 
-Default caches persist for 24 hours at `~/.cache/dedomena/sources.sqlite3`.
+Research and traditional finance caches persist for 24 hours at `~/.cache/dedomena/sources.sqlite3`.
 `refresh=True` fetches new data while keeping previous snapshots for offline replay.
 `DEDOMENA_SOURCE_STORE` selects a shared store, including across Canary workers.
 
@@ -73,6 +73,25 @@ FRED supports ALFRED knowledge dates; SEC retains amendments; ECB exposes
 revisions; World Bank serves current revised indicators.
 See [finance access, throughput and semantics](docs/FINANCE.md).
 
+~~~python
+from dedomena.sources import Hyperliquid
+
+with Hyperliquid() as source:  # Public market data, no key or wallet
+    markets = source.markets()  # Native metadata and asset contexts
+    book = source.order_book("BTC")
+    consume(book.records, book.provenance.to_dict())
+~~~
+
+Hyperliquid adds mids, spot/perpetual metadata, books, candles and funding history.
+Market snapshots default to a zero cache TTL. Candle retention is explicitly
+incomplete; funding supports timestamp checkpoints.
+See [Hyperliquid retrieval and weight](docs/HYPERLIQUID.md).
+
+`IPPool` routes the same source clients through owned local IPs or proxies, with
+shared weighted per-IP admission, key budgets and cooldowns. Reuse one pool for
+Hyperliquid and OpenAlex; extra IPs do not multiply OpenAlex's key allowance.
+See [shared IP routing examples](docs/IP_ROUTING.md).
+
 ## Agent CLI
 
 ~~~sh
@@ -80,6 +99,8 @@ python -m dedomena.sources benchmark openalex 'CRISPR'
 python -m dedomena.sources benchmark europepmc 'TITLE:CRISPR'
 python -m dedomena.sources search epo 'ta="CRISPR"' --max-pages 1
 python -m dedomena.sources quota openalex
+python -m dedomena.sources markets hyperliquid
+python -m dedomena.sources book hyperliquid BTC
 python -m dedomena.sources fetch sec 320193
 python -m dedomena.sources benchmark fred 53 --operation release
 python -m dedomena.sources observations fred GDP --as-of 2020-01-01

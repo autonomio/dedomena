@@ -1,5 +1,6 @@
 """Agent-friendly JSON CLI. Credentials are read exclusively from the environment."""
 import argparse
+from contextlib import ExitStack
 from datetime import date
 import json
 import os
@@ -7,16 +8,41 @@ from pathlib import Path
 import sys
 import time
 
-from . import ECB, EPO, FRED, SEC, EuropePMC, OpenAlex, SourceError, Store, WorldBank
+from . import (ECB, EPO, FRED, SEC, EuropePMC, Hyperliquid, IPPool, IPRoute,
+               OpenAlex, SourceError, Store, WorldBank)
+
+
+def _ip_pool(path):
+    try:
+        with Path(path).expanduser().open("rb") as handle:
+            data = handle.read(65537)
+        if len(data) > 65536:
+            raise ValueError
+        routes = json.loads(data)
+    except (OSError, ValueError, UnicodeDecodeError):
+        raise ValueError("IP routes require a readable JSON file of at most 64 KiB") from None
+    if (not isinstance(routes, list) or not 1 <= len(routes) <= 1000
+            or any(not isinstance(route, dict) or "public_ip" not in route
+                   or not set(route).issubset({"public_ip", "local_address", "proxy"})
+                   for route in routes)):
+        raise ValueError("IP routes require public_ip and one local_address or proxy per entry")
+    return IPPool(IPRoute(**route) for route in routes)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    operations = ("search", "observations", "release", "catalogue")
+    market_operations = ("markets", "mids", "book", "candles", "funding")
+    operations = ("search", "observations", "release", "catalogue", *market_operations)
     parser.add_argument("action", choices=(*operations, "fetch", "quota", "usage", "replay", "benchmark"))
-    parser.add_argument("source", choices=("openalex", "europepmc", "epo", "sec", "fred", "ecb", "worldbank"))
+    parser.add_argument("source", choices=("openalex", "europepmc", "epo", "sec", "fred", "ecb", "worldbank", "hyperliquid"))
     parser.add_argument("query", nargs="?")
     parser.add_argument("--store", help="Shared SQLite snapshot/allowance store")
+    parser.add_argument("--ip-routes", help="JSON file of owned public IP routes and local bindings/proxies")
+    parser.add_argument("--start-time", type=int, help="Hyperliquid start time in epoch milliseconds")
+    parser.add_argument("--end-time", type=int, help="Hyperliquid end time in epoch milliseconds")
+    parser.add_argument("--interval", help="Hyperliquid candle interval, e.g. 1h")
+    parser.add_argument("--spot", action="store_true", help="Hyperliquid spot market metadata")
+    parser.add_argument("--dex", help="Hyperliquid perpetual DEX name")
     parser.add_argument("--profile", choices=("discovery", "evidence"), default="discovery")
     parser.add_argument("--filter")
     parser.add_argument("--refresh", action="store_true")
@@ -45,24 +71,54 @@ def main(argv=None):
         parser.error("SDMX period/delta/last-n options require ECB search or observations")
     if args.action != "benchmark" and args.operation != "search":
         parser.error("--operation selects the benchmark operation only")
+    if operation in market_operations and args.source != "hyperliquid":
+        parser.error("market operations require hyperliquid")
+    if args.source == "hyperliquid" and operation in ("search", "observations", "release"):
+        parser.error("hyperliquid supports markets, mids, book, candles, funding, and fetch")
+    if (args.start_time is not None or args.end_time is not None or args.interval) and (
+            args.source != "hyperliquid" or operation not in ("candles", "funding")):
+        parser.error("epoch time and interval options require Hyperliquid candles or funding")
+    if args.interval and operation != "candles":
+        parser.error("--interval requires candles")
+    if operation in ("candles", "funding") and args.start_time is None:
+        parser.error("historical market operations require --start-time")
+    if operation == "candles" and (args.end_time is None or not args.interval):
+        parser.error("candles require --end-time and --interval")
+    if args.spot and (args.source != "hyperliquid" or operation not in ("markets", "catalogue")):
+        parser.error("--spot requires Hyperliquid markets or catalogue")
+    if args.dex is not None and (args.source != "hyperliquid" or operation not in ("markets", "catalogue", "mids")):
+        parser.error("--dex requires Hyperliquid markets or mids")
     if operation == "release" and args.source != "fred":
         parser.error("release requires fred")
-    if operation == "catalogue" and args.source not in ("ecb", "worldbank"):
-        parser.error("catalogue requires ecb or worldbank")
+    if operation == "catalogue" and args.source not in ("ecb", "worldbank", "hyperliquid"):
+        parser.error("catalogue requires ecb, worldbank or hyperliquid")
     if operation == "observations" and args.source not in ("fred", "ecb", "worldbank"):
         parser.error("observations requires fred, ecb, or worldbank")
-    if operation in ("fetch", "replay", "release", "observations") and not args.query:
+    if operation in ("fetch", "replay", "release", "observations", "book", "candles", "funding") and not args.query:
         parser.error("this action needs an identifier")
     if operation == "search" and not args.query and not (args.source == "openalex" and args.filter):
         parser.error("search needs a query, or an OpenAlex filter")
     if bool(args.start_date) != bool(args.end_date) or (args.start_date and args.source != "epo"):
         parser.error("date partitions require both dates and the epo source")
     store = None
+    resources = ExitStack()
 
     def emit(value):
         print(json.dumps(value, ensure_ascii=False, allow_nan=False))
 
     def pages(source):
+        if args.source == "hyperliquid":
+            if operation in ("markets", "catalogue"):
+                return iter((source.markets(spot=args.spot, dex=args.dex or "", refresh=args.refresh),))
+            if operation == "mids":
+                return iter((source.all_mids(dex=args.dex or "", refresh=args.refresh),))
+            if operation == "book":
+                return iter((source.order_book(args.query, refresh=args.refresh),))
+            if operation == "candles":
+                return iter((source.candles(args.query, args.interval, start_time=args.start_time,
+                                            end_time=args.end_time, refresh=args.refresh),))
+            return source.funding_history(args.query, start_time=args.start_time,
+                                          end_time=args.end_time, refresh=args.refresh)
         if operation == "release":
             if not args.query.isascii() or not args.query.isdecimal():
                 raise ValueError("release identifier must be a positive integer")
@@ -105,8 +161,11 @@ def main(argv=None):
             return 0
         store = Store(args.store) if args.store else None
         constructors = {"openalex": OpenAlex, "europepmc": EuropePMC, "epo": EPO,
-                        "sec": SEC, "fred": FRED, "ecb": ECB, "worldbank": WorldBank}
+                        "sec": SEC, "fred": FRED, "ecb": ECB, "worldbank": WorldBank,
+                        "hyperliquid": Hyperliquid}
         kwargs = {"store": store} if store else {}
+        if args.ip_routes:
+            kwargs["ip_pool"] = resources.enter_context(_ip_pool(args.ip_routes))
         if args.source == "openalex":
             kwargs["profile"] = args.profile
         elif args.source == "europepmc":
@@ -154,6 +213,7 @@ def main(argv=None):
         print(json.dumps(emit_error), file=sys.stderr)
         return 2
     finally:
+        resources.close()
         if store:
             store.close()
     return 0

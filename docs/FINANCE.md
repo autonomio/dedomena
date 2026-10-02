@@ -3,7 +3,8 @@
 Four official APIs cover corporate fundamentals, dated macroeconomic data,
 monetary statistics, reference exchange rates and international indicators.
 Every adapter shares the research-source transport, native records, durable
-snapshots, verified replay and JSON CLI.
+snapshots, verified replay and JSON CLI. [Hyperliquid](HYPERLIQUID.md) adds public
+crypto market data with [weighted IP routing](IP_ROUTING.md).
 
 ## Access and retrieval weight
 
