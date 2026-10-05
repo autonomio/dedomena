@@ -45,6 +45,11 @@ class OpenAlex(Transport):
         kwargs.setdefault("requests_per_second", 100)
         if kwargs["requests_per_second"] > 100:
             raise ValueError("OpenAlex permits at most 100 requests per second")
+        ip_limit = kwargs.setdefault("ip_limit", (100, 1.0))
+        if (not isinstance(ip_limit, tuple) or len(ip_limit) != 2
+                or type(ip_limit[0]) is not int or not 1 <= ip_limit[0] <= 100
+                or type(ip_limit[1]) not in (int, float) or ip_limit[1] != 1):
+            raise ValueError("OpenAlex IP policy permits at most 100 requests per second")
         super().__init__("openalex", "https://api.openalex.org", credential=self.api_key,
                          license="CC0 metadata; article text has separate rights", **kwargs)
 
